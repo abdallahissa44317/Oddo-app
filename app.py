@@ -153,7 +153,7 @@ def fetch_open_sessions(account):
 
 
 # 4. واجهة المستخدم Web UI
-st.title('📱 تطبيق Odoo POS - التقرير المالي مفصولاً حسب العملات')
+st.title('📱POS')
 
 st.sidebar.header('⚙️ الخيارات')
 accounts = cfg.get('accounts', [])
