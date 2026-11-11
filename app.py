@@ -180,7 +180,7 @@ def fetch_session_details(account, session_id):
 
 
 # 5. واجهة المستخدم Web UI
-st.title('📱(issa.02  )')
+st.title('📱 Welcome to anti-amin club')
 
 st.sidebar.header('⚙️ الخيارات')
 accounts = cfg.get('accounts', [])
