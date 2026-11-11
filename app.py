@@ -180,8 +180,9 @@ def fetch_session_details(account, session_id):
 
 
 # 5. واجهة المستخدم Web UI
-st.title('📱 Welcome to anti-amin club')
-st.subheader('وَجَعَلۡنَا مِنۢ بَیۡنِ أَیۡدِیهِمۡ سَدࣰّا وَمِنۡ خَلۡفِهِمۡ سَدࣰّا فَأَغۡشَیۡنَـٰهُمۡ فَهُمۡ لَا یُبۡصِرُونَ')
+
+st.title('وَجَعَلۡنَا مِنۢ بَیۡنِ أَیۡدِیهِمۡ سَدࣰّا وَمِنۡ خَلۡفِهِمۡ سَدࣰّا فَأَغۡشَیۡنَـٰهُمۡ فَهُمۡ لَا یُبۡصِرُونَ')
+st.subheader('📱 Welcome to anti-amin club')
 st.sidebar.header('⚙️ الخيارات')
 accounts = cfg.get('accounts', [])
 acc_labels = [a['label'] for a in accounts]
