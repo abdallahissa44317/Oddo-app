@@ -7,7 +7,7 @@ import streamlit as st
 
 # 1. إعدادات الصفحة
 st.set_page_config(
-    page_title='Web app',
+    page_title='تطبيق Odoo POS - التقرير المالي حسب العملات',
     page_icon='📱',
     layout='wide',
     initial_sidebar_state='expanded',
@@ -32,7 +32,6 @@ CONFIG = {
 }
 
 
-# دالة قراءة التكوين (تأخذ من Streamlit Secrets عند الرفع إن وجدت أو من CONFIG)
 def get_config():
   if hasattr(st, 'secrets') and 'url' in st.secrets:
     return {
@@ -46,7 +45,7 @@ def get_config():
 cfg = get_config()
 
 
-# 3. دالة جلب الجلسات المفتوحة
+# 3. دالة جلب الجلسات وتجميع كل عملة لوحدها بشكل مستقل
 def fetch_open_sessions(account):
   try:
     common = xmlrpc.client.ServerProxy(f"{cfg['url']}/xmlrpc/2/common")
@@ -54,7 +53,7 @@ def fetch_open_sessions(account):
         cfg['db'], account['username'], account['password'], {}
     )
     if not uid:
-      return None, f"فشل الاتصال بالحساب: {account['label']}"
+      return None, None, f"فشل الاتصال بالحساب: {account['label']}"
 
     models = xmlrpc.client.ServerProxy(f"{cfg['url']}/xmlrpc/2/object")
     domain = [('state', '=', 'opened')]
@@ -79,7 +78,7 @@ def fetch_open_sessions(account):
         },
     )
     if not sessions:
-      return [], None
+      return [], [], None
 
     session_ids = [s['id'] for s in sessions]
     orders = models.execute_kw(
@@ -101,7 +100,10 @@ def fetch_open_sessions(account):
       for pid in p_ids:
         order_to_session[pid] = s_id
 
-    session_totals = {s_id: {'USD': 0.0, 'LBP': 0.0} for s_id in session_ids}
+    # تجميع المبالغ لكل عملة على حدة لكل جلسة بغض النظر عن طريقة الدفع (كاش أو بطاقة)
+    session_currency_totals = {s_id: {} for s_id in session_ids}
+    all_currencies_set = set()
+
     if all_p_ids:
       payments = models.execute_kw(
           cfg['db'],
@@ -110,60 +112,50 @@ def fetch_open_sessions(account):
           'pos.payment',
           'search_read',
           [[['id', 'in', all_p_ids]]],
-          {'fields': ['id', 'payment_method_id', 'currency_id', 'amount']},
+          {'fields': ['id', 'currency_id', 'amount']},
       )
       for p in payments:
         amt = p.get('amount', 0.0)
         s_id = order_to_session.get(p['id'])
         if not s_id:
           continue
-        m_name = (
-            p['payment_method_id'][1] if p.get('payment_method_id') else ''
+
+        # استخراج اسم العملة فقط لجعل كل عملة مستقلة
+        curr_name = (
+            p['currency_id'][1] if p.get('currency_id') else 'عملة غير محددة'
         )
-        c_name = p['currency_id'][1] if p.get('currency_id') else ''
-        comb = f'{m_name} {c_name}'.upper()
-        if 'USD' in comb or '$' in comb:
-          session_totals[s_id]['USD'] += amt
-        elif (
-            'LBP' in comb
-            or 'LL' in comb
-            or 'ل.ل' in comb
-            or 'لبناني' in comb
-        ):
-          session_totals[s_id]['LBP'] += amt
-        else:
-          if amt < 1000:
-            session_totals[s_id]['USD'] += amt
-          else:
-            session_totals[s_id]['LBP'] += amt
+        all_currencies_set.add(curr_name)
+
+        if curr_name not in session_currency_totals[s_id]:
+          session_currency_totals[s_id][curr_name] = 0.0
+        session_currency_totals[s_id][curr_name] += amt
 
     data = []
     for s in sessions:
       s_id = s['id']
-      data.append({
+      row = {
           'رمز الجلسة': s.get('name'),
           'الفرع': s['config_id'][1] if s.get('config_id') else 'غير محدد',
           'الكاشير': s['user_id'][1] if s.get('user_id') else 'غير محدد',
           'تاريخ الفتح': s.get('start_at'),
           'الافتتاحي كاش': s.get('cash_register_balance_start', 0.0),
-          'تحصيلات دولار ($)': session_totals[s_id]['USD'],
-          'تحصيلات لبناني (LBP)': session_totals[s_id]['LBP'],
-          'إجمالي المدفوعات': s.get('total_payments_amount', 0.0),
-      })
-    return data, None
+      }
+
+      # إضافة عمود مستقل لكل عملة لتظهر لوحدها تماماً
+      for curr in all_currencies_set:
+        row[f'إجمالي {curr}'] = session_currency_totals[s_id].get(curr, 0.0)
+
+      data.append(row)
+
+    return data, list(all_currencies_set), None
   except Exception as e:
-    return None, str(e)
+    return None, None, str(e)
 
 
 # 4. واجهة المستخدم Web UI
-st.title('📱 تطبيق Odoo POS للمتابعة المالية')
+st.title('📱 تطبيق Odoo POS - التقرير المالي مفصولاً حسب العملات')
 
-# القائمة الجانبية
 st.sidebar.header('⚙️ الخيارات')
-report_type = st.sidebar.radio(
-    'اختر التقرير المطلوب:', ['الجلسات المفتوحة حالياً', 'طلبات مبيعات اليوم']
-)
-
 accounts = cfg.get('accounts', [])
 acc_labels = ['جميع الفروع'] + [a['label'] for a in accounts]
 selected_branch = st.sidebar.selectbox('اختر الفرع:', acc_labels)
@@ -178,47 +170,56 @@ target_accounts = (
 )
 
 all_data = []
+all_currencies_union = set()
 errors = []
 
-with st.spinner('جاري جلب البيانات من سيرفر Odoo...'):
+with st.spinner('جاري جلب البيانات وفصل العملات من سيرفر Odoo...'):
   for acc in target_accounts:
-    res, err = fetch_open_sessions(acc)
+    res, currencies, err = fetch_open_sessions(acc)
     if err:
       errors.append(err)
     elif res:
       all_data.extend(res)
+      if currencies:
+      # تأكيد تحديث مجموعة العملات الشاملة
+        all_currencies_union.update(currencies)
 
 if errors and not all_data:
   st.error('❌ ' + '\n'.join(errors))
 elif not all_data:
-  st.warning('⚠️ لا توجد بيانات متاحة حالياً لهذا الاختيار.')
+  st.warning('⚠️ لا توجد جلسات مفتوحة حالياً لهذا الاختيار.')
 else:
   df = pd.DataFrame(all_data)
 
-  # حساب الإجماليات
-  tot_usd = df['تحصيلات دولار ($)'].sum()
-  tot_lbp = df['تحصيلات لبناني (LBP)'].sum()
+  st.success(f'✨ تم بنجاح عرض البيانات مفصولة حسب العملات لـ {len(df)} جلسة.')
+  st.divider()
 
-  # عرض كروت الإحصائيات في الأعلى
-  c1, c2, c3 = st.columns(3)
-  c1.metric('إجمالي الدولار', f'${tot_usd:,.2f}')
-  c2.metric('إجمالي اللبناني', f'{tot_lbp:,.0f} LBP')
-  c3.metric('العدد الإجمالي', f'{len(df)}')
+  # عرض بطاقات إحصائية مستقلة لكل عملة في أعلى الصفحة
+  st.subheader('📊 إجمالي التحصيلات لكل عملة على حدة')
+  if all_currencies_union:
+    cols = st.columns(len(all_currencies_union))
+    for i, curr in enumerate(all_currencies_union):
+      col_key = f'إجمالي {curr}'
+      if col_key in df.columns:
+        total_curr = df[col_key].sum()
+        with cols[i]:
+          st.metric(label=f'إجمالي {curr}', value=f'{total_curr:,.2f}')
 
   st.divider()
 
-  # عرض الجدول
-  st.subheader(f'📌 جدول {report_type}')
+  st.subheader('📌 جدول الجلسات (كل عملة في عمود مستقل)')
   st.dataframe(df, use_container_width=True)
 
-  # زر تحميل ملف Excel
+  # زر تحميل ملف Excel مفصل حسب العملات
   buffer = io.BytesIO()
   with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-    df.to_excel(writer, index=False, sheet_name='Odoo Data')
+    df.to_excel(writer, index=False, sheet_name='Currencies Report')
 
   st.download_button(
-      label='📥 تنزيل ملف Excel',
+      label='📥 تنزيل ملف Excel مفصل حسب العملات',
       data=buffer.getvalue(),
-      file_name=f"Odoo_Report_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+      file_name=(
+          f"Odoo_Currencies_Report_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
+      ),
       mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
   )
