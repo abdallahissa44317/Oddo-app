@@ -7,7 +7,7 @@ import streamlit as st
 
 # 1. إعدادات الصفحة
 st.set_page_config(
-    page_title='تطبيق Odoo POS - التقرير المالي حسب العملات',
+    page_title='Odoo POS - استعراض الجلسات والعملات',
     page_icon='📱',
     layout='wide',
     initial_sidebar_state='expanded',
@@ -45,26 +45,26 @@ def get_config():
 cfg = get_config()
 
 
-# 3. دالة جلب الجلسات وتجميع كل عملة لوحدها بشكل مستقل
-def fetch_open_sessions(account):
+# 3. دالة جلب جميع الجلسات (المفتوحة والمغلقة)
+def fetch_all_sessions(account):
   try:
     common = xmlrpc.client.ServerProxy(f"{cfg['url']}/xmlrpc/2/common")
     uid = common.authenticate(
         cfg['db'], account['username'], account['password'], {}
     )
     if not uid:
-      return None, None, f"فشل الاتصال بالحساب: {account['label']}"
+      return None, f"فشل الاتصال بالحساب: {account['label']}"
 
     models = xmlrpc.client.ServerProxy(f"{cfg['url']}/xmlrpc/2/object")
-    domain = [('state', '=', 'opened')]
 
+    # جلب آخر 50 جلسة من دون شروط على الحالة (تشمل المفتوحة والمغلقة وقيد الإغلاق)
     sessions = models.execute_kw(
         cfg['db'],
         uid,
         account['password'],
         'pos.session',
         'search_read',
-        [domain],
+        [[]],  # بدون شروط لجلب الكل
         {
             'fields': [
                 'id',
@@ -72,37 +72,58 @@ def fetch_open_sessions(account):
                 'config_id',
                 'user_id',
                 'start_at',
+                'stop_at',
+                'state',
                 'cash_register_balance_start',
                 'total_payments_amount',
-            ]
+            ],
+            'limit': 50,  # آخر 50 جلسة لتسريع التصفح
+            'order': 'id desc',
         },
     )
-    if not sessions:
-      return [], [], None
+    return sessions, None
+  except Exception as e:
+    return None, str(e)
 
-    session_ids = [s['id'] for s in sessions]
+
+# 4. دالة جلب تفاصيل جلسة محددة مع فصل العملات
+def fetch_session_details(account, session_id):
+  try:
+    common = xmlrpc.client.ServerProxy(f"{cfg['url']}/xmlrpc/2/common")
+    uid = common.authenticate(
+        cfg['db'], account['username'], account['password'], {}
+    )
+    if not uid:
+      return None, 'فشل المصادقة'
+
+    models = xmlrpc.client.ServerProxy(f"{cfg['url']}/xmlrpc/2/object")
+
     orders = models.execute_kw(
         cfg['db'],
         uid,
         account['password'],
         'pos.order',
         'search_read',
-        [[('session_id', 'in', session_ids)]],
-        {'fields': ['id', 'session_id', 'payment_ids']},
+        [[('session_id', '=', session_id)]],
+        {'fields': ['id', 'name', 'date_order', 'amount_total', 'payment_ids']},
     )
 
-    order_to_session = {}
+    if not orders:
+      return {'currency_totals': {}, 'payments': []}, None
+
+    order_to_info = {}
     all_p_ids = []
     for o in orders:
-      s_id = o['session_id'][0] if o.get('session_id') else None
       p_ids = o.get('payment_ids', [])
       all_p_ids.extend(p_ids)
       for pid in p_ids:
-        order_to_session[pid] = s_id
+        order_to_info[pid] = {
+            'order_name': o.get('name'),
+            'order_date': o.get('date_order'),
+        }
 
-    # تجميع المبالغ لكل عملة على حدة لكل جلسة بغض النظر عن طريقة الدفع (كاش أو بطاقة)
-    session_currency_totals = {s_id: {} for s_id in session_ids}
-    all_currencies_set = set()
+    currency_totals = {}
+    payment_details = []
 
     if all_p_ids:
       payments = models.execute_kw(
@@ -112,114 +133,137 @@ def fetch_open_sessions(account):
           'pos.payment',
           'search_read',
           [[['id', 'in', all_p_ids]]],
-          {'fields': ['id', 'currency_id', 'amount']},
+          {
+              'fields': [
+                  'id',
+                  'payment_method_id',
+                  'currency_id',
+                  'amount',
+                  'payment_date',
+              ]
+          },
       )
       for p in payments:
         amt = p.get('amount', 0.0)
-        s_id = order_to_session.get(p['id'])
-        if not s_id:
-          continue
-
-        # استخراج اسم العملة فقط لجعل كل عملة مستقلة
-        curr_name = (
-            p['currency_id'][1] if p.get('currency_id') else 'عملة غير محددة'
+        pid = p['id']
+        m_name = (
+            p['payment_method_id'][1]
+            if p.get('payment_method_id')
+            else 'أخرى'
         )
-        all_currencies_set.add(curr_name)
+        curr_name = (
+            p['currency_id'][1] if p.get('currency_id') else 'عملة أساسية'
+        )
 
-        if curr_name not in session_currency_totals[s_id]:
-          session_currency_totals[s_id][curr_name] = 0.0
-        session_currency_totals[s_id][curr_name] += amt
+        # تجميع المبلغ حسب العملة بشكل مستقل تماماً
+        if curr_name not in currency_totals:
+          currency_totals[curr_name] = 0.0
+        currency_totals[curr_name] += amt
 
-    data = []
-    for s in sessions:
-      s_id = s['id']
-      row = {
-          'رمز الجلسة': s.get('name'),
-          'الفرع': s['config_id'][1] if s.get('config_id') else 'غير محدد',
-          'الكاشير': s['user_id'][1] if s.get('user_id') else 'غير محدد',
-          'تاريخ الفتح': s.get('start_at'),
-          'الافتتاحي كاش': s.get('cash_register_balance_start', 0.0),
-      }
+        info = order_to_info.get(pid, {})
+        payment_details.append({
+            'رقم الطلب': info.get('order_name', '-'),
+            'طريقة الدفع': m_name,
+            'العملة': curr_name,
+            'المبلغ': amt,
+            'تاريخ العملية': p.get('payment_date', ''),
+        })
 
-      # إضافة عمود مستقل لكل عملة لتظهر لوحدها تماماً
-      for curr in all_currencies_set:
-        row[f'إجمالي {curr}'] = session_currency_totals[s_id].get(curr, 0.0)
-
-      data.append(row)
-
-    return data, list(all_currencies_set), None
+    return {'currency_totals': currency_totals, 'payments': payment_details}, None
   except Exception as e:
-    return None, None, str(e)
+    return None, str(e)
 
 
-# 4. واجهة المستخدم Web UI
-st.title('📱POS')
+# 5. واجهة المستخدم Web UI
+st.title('📱 استعراض جميع جلسات POS (مفتوحة ومغلقة)')
 
 st.sidebar.header('⚙️ الخيارات')
 accounts = cfg.get('accounts', [])
-acc_labels = ['جميع الفروع'] + [a['label'] for a in accounts]
-selected_branch = st.sidebar.selectbox('اختر الفرع:', acc_labels)
-
-if st.sidebar.button('🔄 تحديث البيانات'):
-  st.rerun()
-
-target_accounts = (
-    accounts
-    if selected_branch == 'جميع الفروع'
-    else [a for a in accounts if a['label'] == selected_branch]
+acc_labels = [a['label'] for a in accounts]
+selected_branch_label = st.sidebar.selectbox('اختر الفرع:', acc_labels)
+selected_account = next(
+    (a for a in accounts if a['label'] == selected_branch_label), accounts[0]
 )
 
-all_data = []
-all_currencies_union = set()
-errors = []
+if st.sidebar.button('🔄 تحديث القائمة'):
+  st.rerun()
 
-with st.spinner('جاري جلب البيانات وفصل العملات من سيرفر Odoo...'):
-  for acc in target_accounts:
-    res, currencies, err = fetch_open_sessions(acc)
-    if err:
-      errors.append(err)
-    elif res:
-      all_data.extend(res)
-      if currencies:
-      # تأكيد تحديث مجموعة العملات الشاملة
-        all_currencies_union.update(currencies)
+with st.spinner('جاري جلب قائمة الجلسات من أودو...'):
+  sessions, err = fetch_all_sessions(selected_account)
 
-if errors and not all_data:
-  st.error('❌ ' + '\n'.join(errors))
-elif not all_data:
-  st.warning('⚠️ لا توجد جلسات مفتوحة حالياً لهذا الاختيار.')
+if err:
+  st.error(f'❌ خطأ في الاتصال: {err}')
+elif not sessions:
+  st.warning('⚠️ لا توجد جلسات مسجلة في هذا الحساب.')
 else:
-  df = pd.DataFrame(all_data)
+  # تجهيز خيارات قائمة الجلسات مع حالتها
+  session_options = {}
+  state_map = {
+      'opened': 'مفتوحة 🟢',
+      'closing_control': 'قيد الإغلاق 🟡',
+      'closed': 'مغلقة 🔴',
+  }
 
-  st.success(f'✨ تم بنجاح عرض البيانات مفصولة حسب العملات لـ {len(df)} جلسة.')
+  for s in sessions:
+    s_name = s.get('name', 'بدون اسم')
+    s_state = s.get('state', '')
+    state_txt = state_map.get(s_state, s_state)
+    s_date = s.get('start_at', 'بدون تاريخ')
+    label = f'جلسة: {s_name} | الحالة: {state_txt} | البدء: {s_date}'
+    session_options[label] = s['id']
+
   st.divider()
-
-  # عرض بطاقات إحصائية مستقلة لكل عملة في أعلى الصفحة
-  st.subheader('📊 إجمالي التحصيلات لكل عملة على حدة')
-  if all_currencies_union:
-    cols = st.columns(len(all_currencies_union))
-    for i, curr in enumerate(all_currencies_union):
-      col_key = f'إجمالي {curr}'
-      if col_key in df.columns:
-        total_curr = df[col_key].sum()
-        with cols[i]:
-          st.metric(label=f'إجمالي {curr}', value=f'{total_curr:,.2f}')
-
-  st.divider()
-
-  st.subheader('📌 جدول الجلسات (كل عملة في عمود مستقل)')
-  st.dataframe(df, use_container_width=True)
-
-  # زر تحميل ملف Excel مفصل حسب العملات
-  buffer = io.BytesIO()
-  with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-    df.to_excel(writer, index=False, sheet_name='Currencies Report')
-
-  st.download_button(
-      label='📥 تنزيل ملف Excel مفصل حسب العملات',
-      data=buffer.getvalue(),
-      file_name=(
-          f"Odoo_Currencies_Report_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
-      ),
-      mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  st.subheader('🔍 اختر الجلسة المطلوب استعراض تفاصيلها:')
+  chosen_label = st.selectbox(
+      'اختر من القائمة أدناه:', list(session_options.keys())
   )
+  chosen_session_id = session_options[chosen_label]
+
+  # جلب وعرض تفاصيل الجلسة المختارة عند النقر أو تلقائياً
+  with st.spinner('جاري جلب تفاصيل العمليات والمدفوعات للجلسة...'):
+    details, err_det = fetch_session_details(selected_account, chosen_session_id)
+
+  if err_det:
+    st.error(f'❌ {err_det}')
+  elif details:
+    curr_totals = details['currency_totals']
+    payments_list = details['payments']
+
+    st.success('✨ تم تحميل تفاصيل الجلسة بنجاح!')
+    st.divider()
+
+    # عرض بطاقات الإحصائيات لكل عملة وحدها
+    st.subheader('📊 إجمالي المبالغ حسب كل عملة')
+    if curr_totals:
+      cols = st.columns(len(curr_totals))
+      for i, (curr, total) in enumerate(curr_totals.items()):
+        with cols[i]:
+          st.metric(label=f'إجمالي {curr}', value=f'{total:,.2f}')
+    else:
+      st.info('ℹ️ لا توجد مدفوعات مسجلة لهذه الجلسة.')
+
+    st.divider()
+
+    # عرض جدول تفاصيل حركات الدفع
+    st.subheader('📌 جدول حركات الدفع التفصيلية')
+    if payments_list:
+      df_payments = pd.DataFrame(payments_list)
+      st.dataframe(df_payments, use_container_width=True)
+
+      # زر تحميل تقرير هذه الجلسة كملف Excel
+      buffer = io.BytesIO()
+      with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+        df_payments.to_excel(
+            writer, index=False, sheet_name='Session Details'
+        )
+
+      st.download_button(
+          label='📥 تنزيل تقرير هذه الجلسة بصيغة Excel',
+          data=buffer.getvalue(),
+          file_name=f"Session_Report_{chosen_session_id}.xlsx",
+          mime=(
+              'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+          ),
+      )
+    else:
+      st.warning('⚠️ لا توجد مدفوعات نقدية أو تفصيلية مرتبطة بهذه الجلسة.')
