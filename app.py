@@ -7,7 +7,7 @@ import streamlit as st
 
 # 1. إعدادات الصفحة
 st.set_page_config(
-    page_title='Odoo POS - استعراض الجلسات والعملات',
+    page_title='Odoo POS - استعراض الجلسات وطرق الدفع والعملات',
     page_icon='📱',
     layout='wide',
     initial_sidebar_state='expanded',
@@ -15,6 +15,7 @@ st.set_page_config(
 
 # 2. إعدادات الاتصال المدمجة
 CONFIG = {
+    'url': 'https://your-odoo-domain.com',  # ضع هنا رابط سيرفر Odoo الخاص بك
     'url': 'https://navybits-al-amin.odoo.com/',  # ضع هنا رابط سيرفر Odoo
     'db': 'navybits-al-amin-production-16937617',  # ضع هنا اسم قاعدة البيانات
     'accounts': [
@@ -57,14 +58,13 @@ def fetch_all_sessions(account):
 
     models = xmlrpc.client.ServerProxy(f"{cfg['url']}/xmlrpc/2/object")
 
-    # جلب آخر 50 جلسة من دون شروط على الحالة (تشمل المفتوحة والمغلقة وقيد الإغلاق)
     sessions = models.execute_kw(
         cfg['db'],
         uid,
         account['password'],
         'pos.session',
         'search_read',
-        [[]],  # بدون شروط لجلب الكل
+        [[]],
         {
             'fields': [
                 'id',
@@ -77,7 +77,7 @@ def fetch_all_sessions(account):
                 'cash_register_balance_start',
                 'total_payments_amount',
             ],
-            'limit': 50,  # آخر 50 جلسة لتسريع التصفح
+            'limit': 50,
             'order': 'id desc',
         },
     )
@@ -86,7 +86,7 @@ def fetch_all_sessions(account):
     return None, str(e)
 
 
-# 4. دالة جلب تفاصيل جلسة محددة مع فصل العملات
+# 4. دالة جلب تفاصيل جلسة محددة مع فصل البطاقة البنكية وطرق الدفع لكل عملة
 def fetch_session_details(account, session_id):
   try:
     common = xmlrpc.client.ServerProxy(f"{cfg['url']}/xmlrpc/2/common")
@@ -109,7 +109,7 @@ def fetch_session_details(account, session_id):
     )
 
     if not orders:
-      return {'currency_totals': {}, 'payments': []}, None
+      return {'method_currency_totals': {}, 'payments': []}, None
 
     order_to_info = {}
     all_p_ids = []
@@ -122,7 +122,7 @@ def fetch_session_details(account, session_id):
             'order_date': o.get('date_order'),
         }
 
-    currency_totals = {}
+    method_currency_totals = {}
     payment_details = []
 
     if all_p_ids:
@@ -149,16 +149,18 @@ def fetch_session_details(account, session_id):
         m_name = (
             p['payment_method_id'][1]
             if p.get('payment_method_id')
-            else 'أخرى'
+            else 'طريقة أخرى'
         )
         curr_name = (
             p['currency_id'][1] if p.get('currency_id') else 'عملة أساسية'
         )
 
-        # تجميع المبلغ حسب العملة بشكل مستقل تماماً
-        if curr_name not in currency_totals:
-          currency_totals[curr_name] = 0.0
-        currency_totals[curr_name] += amt
+        # دمج طريقة الدفع (مثل البطاقة البنكية أو الكاش) مع العملة لتظهر مستقلة تماماً
+        combo_label = f'{m_name} ({curr_name})'
+
+        if combo_label not in method_currency_totals:
+          method_currency_totals[combo_label] = 0.0
+        method_currency_totals[combo_label] += amt
 
         info = order_to_info.get(pid, {})
         payment_details.append({
@@ -169,13 +171,16 @@ def fetch_session_details(account, session_id):
             'تاريخ العملية': p.get('payment_date', ''),
         })
 
-    return {'currency_totals': currency_totals, 'payments': payment_details}, None
+    return {
+        'method_currency_totals': method_currency_totals,
+        'payments': payment_details,
+    }, None
   except Exception as e:
     return None, str(e)
 
 
 # 5. واجهة المستخدم Web UI
-st.title('📱 استعراض جميع جلسات POS (مفتوحة ومغلقة)')
+st.title('📱 استعراض جلسات POS (تفصيل البطاقة البنكية والعملات)')
 
 st.sidebar.header('⚙️ الخيارات')
 accounts = cfg.get('accounts', [])
@@ -196,7 +201,6 @@ if err:
 elif not sessions:
   st.warning('⚠️ لا توجد جلسات مسجلة في هذا الحساب.')
 else:
-  # تجهيز خيارات قائمة الجلسات مع حالتها
   session_options = {}
   state_map = {
       'opened': 'مفتوحة 🟢',
@@ -219,26 +223,25 @@ else:
   )
   chosen_session_id = session_options[chosen_label]
 
-  # جلب وعرض تفاصيل الجلسة المختارة عند النقر أو تلقائياً
   with st.spinner('جاري جلب تفاصيل العمليات والمدفوعات للجلسة...'):
     details, err_det = fetch_session_details(selected_account, chosen_session_id)
 
   if err_det:
     st.error(f'❌ {err_det}')
   elif details:
-    curr_totals = details['currency_totals']
+    totals = details['method_currency_totals']
     payments_list = details['payments']
 
-    st.success('✨ تم تحميل تفاصيل الجلسة بنجاح!')
+    st.success('✨ تم تحميل تفاصيل الجلسة مع فصل البطاقة البنكية والعملات بنجاح!')
     st.divider()
 
-    # عرض بطاقات الإحصائيات لكل عملة وحدها
-    st.subheader('📊 إجمالي المبالغ حسب كل عملة')
-    if curr_totals:
-      cols = st.columns(len(curr_totals))
-      for i, (curr, total) in enumerate(curr_totals.items()):
+    # عرض بطاقات الإحصائيات لكل طريقة دفع وعملة على حدة (مثل البطاقة البنكية، الكاش، إلخ)
+    st.subheader('📊 إجمالي المبالغ حسب طريقة الدفع والعملة')
+    if totals:
+      cols = st.columns(len(totals))
+      for i, (label_key, total) in enumerate(totals.items()):
         with cols[i]:
-          st.metric(label=f'إجمالي {curr}', value=f'{total:,.2f}')
+          st.metric(label=label_key, value=f'{total:,.2f}')
     else:
       st.info('ℹ️ لا توجد مدفوعات مسجلة لهذه الجلسة.')
 
@@ -266,4 +269,4 @@ else:
           ),
       )
     else:
-      st.warning('⚠️ لا توجد مدفوعات نقدية أو تفصيلية مرتبطة بهذه الجلسة.')
+      st.warning('⚠️ لا توجد مدفوعات نقدية أو بطاقات بنكية مرتبطة بهذه الجلسة.')
