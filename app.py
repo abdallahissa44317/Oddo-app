@@ -7,7 +7,7 @@ import streamlit as st
 
 # 1. إعدادات الصفحة
 st.set_page_config(
-    page_title='Odoo POS - استعراض الجلسات وطرق الدفع والعملات',
+    page_title='new.02',
     page_icon='📱',
     layout='wide',
     initial_sidebar_state='expanded',
